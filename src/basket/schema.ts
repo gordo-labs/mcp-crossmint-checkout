@@ -38,13 +38,34 @@ export const ProductSnapshotSchema = z.object({
   evidence: FlexibleRecordSchema.optional().describe("Query, reason, confidence, sources, observed timestamps."),
 }).passthrough();
 
+export const PlatformSessionSchema = z.object({
+  domain: z.string().describe("Merchant domain requiring login (e.g. namecheap.com, united.com)."),
+  status: z.enum(["none", "needs_account", "needs_login", "logged_in"]).default("none"),
+  method: z.enum(["username_password", "oauth_google", "oauth_github", "sso", "magic_link", "api_key", "none"]).default("none"),
+  email: z.string().email().optional(),
+  notes: z.string().optional(),
+  lastVerified: z.string().optional(),
+}).passthrough();
+
 export const CheckoutSchema = z.object({
-  provider: z.enum(["crossmint", "merchant", "manual", "unknown"]).optional(),
+  provider: z.enum(["crossmint", "lobstercash_card", "lobstercash_crypto", "merchant", "manual", "unknown"]).optional(),
   locator: z.string().optional().describe("Provider-specific checkout locator."),
   supported: z.boolean().optional(),
-  readiness: z.enum(["missing_locator", "needs_validation", "ready", "blocked", "unknown"]).optional(),
+  readiness: z.enum([
+    "missing_locator",
+    "needs_validation",
+    "needs_session",
+    "needs_approval",
+    "ready",
+    "blocked",
+    "unknown"
+  ]).optional(),
   orderId: z.string().optional(),
   lastCheckedAt: z.string().optional(),
+  requiresAuth: z.boolean().default(false).describe("Does this purchase require login/registration?"),
+  sessionDomain: z.string().optional().describe("Domain that needs a session (for session store lookup)."),
+  authType: z.enum(["login", "register", "guest", "unknown"]).default("unknown"),
+  guestCheckoutAvailable: z.boolean().optional(),
   notes: z.string().optional(),
 }).passthrough();
 
@@ -139,12 +160,25 @@ export type ProductSnapshot = Record<string, unknown> & {
   };
 };
 
+export type PlatformSession = Record<string, unknown> & {
+  domain: string;
+  status: "none" | "needs_account" | "needs_login" | "logged_in";
+  method?: "username_password" | "oauth_google" | "oauth_github" | "sso" | "magic_link" | "api_key" | "none";
+  email?: string;
+  notes?: string;
+  lastVerified?: string;
+};
+
 export type CheckoutState = Record<string, unknown> & {
-  provider?: "crossmint" | "merchant" | "manual" | "unknown";
+  provider?: "crossmint" | "lobstercash_card" | "lobstercash_crypto" | "merchant" | "manual" | "unknown";
   locator?: string;
   supported?: boolean;
-  readiness?: "missing_locator" | "needs_validation" | "ready" | "blocked" | "unknown";
+  readiness?: "missing_locator" | "needs_validation" | "needs_session" | "needs_approval" | "ready" | "blocked" | "unknown";
   orderId?: string;
+  requiresAuth?: boolean;
+  sessionDomain?: string;
+  authType?: "login" | "register" | "guest" | "unknown";
+  guestCheckoutAvailable?: boolean;
 };
 
 export type CartItem = Record<string, unknown> & {
