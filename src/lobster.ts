@@ -132,16 +132,35 @@ export function isInstalled(): boolean {
 export function status(): LobsterStatus {
   try {
     const { stdout } = run(["status"]);
-    const data = parseJson(stdout) as Record<string, unknown>;
+
+    // Parse human-readable output
+    const walletMatch = stdout.match(/Base wallet:\s*Authorized/i);
+    const walletConfigured = !!walletMatch;
+    const addressMatch = stdout.match(/Address:\s*(0x[a-fA-F0-9]+)/i);
+    const walletAddress = addressMatch ? addressMatch[1] : undefined;
+    const balanceMatch = stdout.match(/Balance:\s*(.+)/i);
+    const balanceStr = balanceMatch ? balanceMatch[1].trim() : "";
+    const cardsMatch = stdout.match(/Cards:\s*Authorized/i);
+    const cardsAuthorized = !!cardsMatch;
+
+    // Parse balance tokens: "0 eth, 0 usdc"
+    const balances: { token: string; amount: string }[] = [];
+    if (balanceStr) {
+      const parts = balanceStr.split(",").map((s: string) => s.trim());
+      for (const part of parts) {
+        const m = part.match(/^([\d.]+)\s+(\w+)/i);
+        if (m) balances.push({ amount: m[1], token: m[2].toUpperCase() });
+      }
+    }
 
     return {
       available: true,
       installed: true,
-      walletConfigured: (data.walletConfigured as boolean) || false,
-      walletAddress: data.walletAddress as string | undefined,
-      balances: data.balances as LobsterStatus["balances"],
-      cards: data.cards as LobsterStatus["cards"],
-      hasBrowserAutomation: (data.hasBrowserAutomation as boolean) || false,
+      walletConfigured,
+      walletAddress,
+      balances: balances.length > 0 ? balances : undefined,
+      cards: undefined,
+      hasBrowserAutomation: false,
     };
   } catch (error) {
     if (error instanceof LobsterError) {
@@ -188,6 +207,9 @@ export function cardsRequest(amount: number, description: string): CardRequestRe
 
 export function cardsList(): { cards: unknown[] } {
   const { stdout } = run(["cards", "list"]);
+  if (stdout.includes("No virtual cards found")) {
+    return { cards: [] };
+  }
   const data = parseJson(stdout) as Record<string, unknown>;
   return { cards: (data.cards as unknown[]) || (data as unknown as unknown[]) || [] };
 }
@@ -218,10 +240,16 @@ export function cardsReveal(
 
 export function cryptoBalance(): CryptoBalanceResult {
   const { stdout } = run(["crypto", "balance"]);
-  const data = parseJson(stdout) as Record<string, unknown>;
-  return {
-    balances: (data.balances as CryptoBalanceResult["balances"]) || [],
-  };
+
+  // Parse human-readable balance output
+  const balances: { token: string; amount: string }[] = [];
+  const lines = stdout.split("\n");
+  for (const line of lines) {
+    const m = line.trim().match(/^([a-z]+):\s*([\d.]+)/i);
+    if (m) balances.push({ token: m[1].toUpperCase(), amount: m[2] });
+  }
+
+  return { balances };
 }
 
 export function cryptoSend(
