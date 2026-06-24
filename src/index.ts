@@ -19,6 +19,7 @@ import {
   PlatformSessionSchema,
 } from "./basket/schema.js";
 import { SessionStore } from "./sessions/store.js";
+import * as LobsterCash from "./lobster.js";
 
 dotenv.config();
 
@@ -414,6 +415,118 @@ registerTool(
   async () => {
     const sessions = await sessionStore.listSessions();
     return textResponse({ sessions });
+  }
+);
+
+// ─── Lobster Cash tools ───
+
+registerTool(
+  "lobstercash-status",
+  "Check Lobster Cash availability, wallet configuration, balances, and installed cards. Use this first before attempting any Lobster Cash payment.",
+  {},
+  async () => {
+    return textResponse(LobsterCash.status());
+  }
+);
+
+registerTool(
+  "lobstercash-cards-request",
+  "Request a virtual card with a spending limit through Lobster Cash. The amount is rounded up to the nearest $5. Returns an approval URL for the human to authorize. The card can be revealed later with lobstercash-cards-reveal.",
+  {
+    amount: z.number().positive().describe("Maximum amount to load on the card (rounded up to nearest $5)."),
+    description: z.string().describe("Purchase description (e.g. 'Domain name from Namecheap')."),
+    itemId: z.string().optional().describe("Basket item id to link this card request to."),
+  },
+  async ({ amount, description, itemId }: any) => {
+    try {
+      const result = LobsterCash.cardsRequest(amount, description);
+      if (itemId) {
+        const item = (await basketStore.load()).items.find((i: any) => i.id === itemId);
+        if (item) {
+          await basketStore.upsertItem({
+            ...item,
+            checkout: {
+              ...(item.checkout as Record<string, unknown> || {}),
+              provider: "lobstercash_card",
+              readiness: "needs_approval",
+            },
+          });
+        }
+      }
+      return textResponse(result);
+    } catch (error: any) {
+      return textResponse({
+        error: error.message || String(error),
+        code: error.code || "unknown",
+        available: LobsterCash.isInstalled(),
+      });
+    }
+  }
+);
+
+registerTool(
+  "lobstercash-cards-reveal",
+  "Reveal virtual card details for use in a merchant checkout form. The credentials are single-use and merchant-locked. NEVER log the full card number or CVC — use them only to fill the payment form.",
+  {
+    cardId: z.string().describe("Card id from lobstercash-cards-request or lobstercash-status."),
+    merchantName: z.string().describe("Merchant name (e.g. 'Namecheap')."),
+    merchantUrl: z.string().url().describe("Merchant URL (e.g. 'https://www.namecheap.com')."),
+    merchantCountry: z.string().length(2).describe("ISO 2-letter merchant country code (e.g. 'US')."),
+  },
+  async ({ cardId, merchantName, merchantUrl, merchantCountry }: any) => {
+    try {
+      const result = LobsterCash.cardsReveal(cardId, merchantName, merchantUrl, merchantCountry);
+      return textResponse({
+        cardNumber: `****${result.cardNumber.slice(-4)}`,
+        expiryMonth: result.expiryMonth,
+        expiryYear: result.expiryYear,
+        cvc: "***",
+        raw: result,
+        warning: "Use raw.cardNumber and raw.cvc ONLY in the merchant payment form. Never log or display them.",
+      });
+    } catch (error: any) {
+      return textResponse({
+        error: error.message || String(error),
+        code: error.code || "unknown",
+      });
+    }
+  }
+);
+
+registerTool(
+  "lobstercash-crypto-balance",
+  "Get crypto wallet balances from Lobster Cash. Returns available tokens and amounts for x402 or crypto payments.",
+  {},
+  async () => {
+    try {
+      return textResponse(LobsterCash.cryptoBalance());
+    } catch (error: any) {
+      return textResponse({
+        error: error.message || String(error),
+        code: error.code || "unknown",
+      });
+    }
+  }
+);
+
+registerTool(
+  "lobstercash-crypto-send",
+  "Send crypto from the Lobster Cash wallet to an address. Supports USDC and other tokens. Use for x402 payments or direct transfers.",
+  {
+    to: z.string().describe("Destination wallet address."),
+    amount: z.number().positive().describe("Amount to send."),
+    token: z.string().optional().describe("Token symbol (e.g. 'USDC'). Uses wallet default if omitted."),
+  },
+  async ({ to, amount, token }: any) => {
+    try {
+      const result = LobsterCash.cryptoSend(to, amount, token);
+      return textResponse(result);
+    } catch (error: any) {
+      return textResponse({
+        error: error.message || String(error),
+        code: error.code || "unknown",
+      });
+    }
   }
 );
 
