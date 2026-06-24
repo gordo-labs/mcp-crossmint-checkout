@@ -246,6 +246,11 @@ export class BasketStore {
     return true;
   }
 
+  async saveItems(items: CartItem[]): Promise<Basket> {
+    const basket = await this.load();
+    return this.save({ ...basket, items });
+  }
+
   async clear(): Promise<Basket> {
     const basket = await this.load();
     return this.save({ ...basket, items: [] });

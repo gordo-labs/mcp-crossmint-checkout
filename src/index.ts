@@ -16,7 +16,9 @@ import {
   BasketContextInputSchema,
   CandidateStatusSchema,
   CartItemInputSchema,
+  PlatformSessionSchema,
 } from "./basket/schema.js";
+import { SessionStore } from "./sessions/store.js";
 
 dotenv.config();
 
@@ -28,6 +30,7 @@ const CHAIN = isProduction ? 'ethereum' : 'ethereum-sepolia';
 const TOKEN = 'credit';
 const USER_AGENT = "crossmint-checkout/1.0";
 const basketStore = new BasketStore();
+const sessionStore = new SessionStore();
 const basketContextToolShape = BasketContextInputSchema.shape as Record<string, z.ZodTypeAny>;
 const cartItemInputToolSchema = (CartItemInputSchema as z.ZodTypeAny)
   .describe("Universal cart product candidate with product, price, merchant, evidence, and checkout fields.");
@@ -252,6 +255,165 @@ registerTool(
         addItem: `${getBasketViewerUrl(port)}/api/items`,
       },
     });
+  }
+);
+
+registerTool(
+  "basket-detect-checkout-requirements",
+  "Analyze a basket item and determine its checkout provider, auth requirements, and platform metadata. Consults the session store for known sessions on the merchant domain.",
+  {
+    itemId: z.string().describe("Basket item id to analyze."),
+  },
+  async ({ itemId }: any) => {
+    const basket = await basketStore.load();
+    const item = basket.items.find((i: any) => i.id === itemId);
+    if (!item) {
+      return textResponse({ error: "Item not found", itemId });
+    }
+
+    const locator: string | undefined = item.checkout?.locator || item.product.identifiers?.crossmintLocator || item.product.identifiers?.productLocator;
+    const sourceUrl: string | undefined = item.product.identifiers?.sourceUrl || item.product.urls?.product;
+    const domain: string | undefined = (item.checkout?.sessionDomain as string | undefined) || (item.product.merchant as Record<string, unknown> | undefined)?.domain as string | undefined || (sourceUrl ? new URL(sourceUrl).hostname : undefined);
+
+    // Detect provider from locator
+    let provider: "crossmint" | "lobstercash_card" | "lobstercash_crypto" | "merchant" | "manual" | "unknown" = "unknown";
+    if (locator) {
+      if (locator.startsWith("amazon:") || locator.startsWith("shopify:")) {
+        provider = "crossmint";
+      }
+    }
+
+    // Detect from URL patterns
+    if (provider === "unknown" && sourceUrl) {
+      try {
+        const parsed = new URL(sourceUrl);
+        if (parsed.hostname.includes("amazon.com")) provider = "crossmint";
+        else if (parsed.pathname.includes("/checkout") || parsed.pathname.includes("/cart")) provider = "lobstercash_card";
+      } catch { /* keep unknown */ }
+    }
+
+    // Platform checkout info from product
+    const platCheckout: any = item.product.platformCheckout;
+    const authRequired: boolean = item.checkout?.requiresAuth === true || platCheckout?.authRequired === true;
+    const guestCheckoutAvailable: boolean | null = item.checkout?.guestCheckoutAvailable ?? platCheckout?.guestCheckout ?? null;
+    const authType: string = item.checkout?.authType || "unknown";
+
+    // Check session store
+    let knownSession: Record<string, unknown> | null = null;
+    let sessionStatus: string = "none";
+    if (domain) {
+      knownSession = await sessionStore.getSession(domain) as Record<string, unknown> | null;
+      sessionStatus = (knownSession?.status as string) || "none";
+    }
+
+    // Build recommendation
+    let recommendation: string;
+    if (provider === "crossmint") {
+      recommendation = "Use create-order with product locator";
+    } else if (authRequired && sessionStatus !== "logged_in") {
+      recommendation = "Login required before checkout. Use basket-set-session once logged in.";
+    } else if (guestCheckoutAvailable) {
+      recommendation = "Guest checkout available. Use lobstercash_card for payment.";
+    } else if (provider === "lobstercash_card") {
+      recommendation = "Use lobstercash cards request";
+    } else {
+      recommendation = "Manual checkout required — no automated provider detected.";
+    }
+
+    // Update item checkout fields
+    const readiness: "missing_locator" | "needs_session" | "ready" | "unknown" =
+      authRequired && sessionStatus !== "logged_in" ? "needs_session"
+      : provider !== "unknown" ? "ready"
+      : "unknown";
+    const updatedCheckout: Record<string, unknown> = {
+      ...(item.checkout as Record<string, unknown> || {}),
+      provider,
+      requiresAuth: authRequired,
+      authType,
+      sessionDomain: domain,
+      guestCheckoutAvailable: guestCheckoutAvailable ?? undefined,
+      readiness,
+    };
+    await basketStore.upsertItem({ ...item, checkout: updatedCheckout });
+
+    return textResponse({
+      itemId,
+      provider,
+      checkoutRequirements: {
+        provider,
+        authRequired,
+        authType,
+        guestCheckoutAvailable,
+        sessionStatus,
+        knownSession,
+        supportedPaymentMethods: platCheckout?.supportedPaymentMethods || [],
+        recommendation,
+      },
+    });
+  }
+);
+
+registerTool(
+  "basket-set-session",
+  "Record a platform session for a merchant domain. Used when the agent logs into or registers on a site so future checkouts know the session state.",
+  {
+    domain: z.string().describe("Merchant domain (e.g. namecheap.com)."),
+    status: z.enum(["none", "needs_account", "needs_login", "logged_in"]).describe("Current session status."),
+    method: z.enum(["username_password", "oauth_google", "oauth_github", "sso", "magic_link", "api_key", "none"]).optional().describe("Authentication method used."),
+    email: z.string().email().optional().describe("Email associated with the session."),
+    notes: z.string().optional(),
+  },
+  async ({ domain, status, method, email, notes }: any) => {
+    const session = await sessionStore.setSession(domain, {
+      domain,
+      status,
+      method: method || "none",
+      email,
+      notes,
+      lastVerified: new Date().toISOString(),
+    });
+
+    // Update checkout readiness for items matching this domain
+    const basket = await basketStore.load();
+    const updatedItems = basket.items.map((item: any) => {
+      const itemDomain = item.checkout?.sessionDomain || item.product.merchant?.domain;
+      if (itemDomain === domain && item.checkout?.requiresAuth && status === "logged_in") {
+        return {
+          ...item,
+          checkout: {
+            ...(item.checkout as Record<string, unknown> || {}),
+            readiness: "ready",
+          },
+        };
+      }
+      return item;
+    });
+
+    // Write back only if items changed
+    const changed = basket.items.some((item: any, idx: number) => {
+      const updated: any = updatedItems[idx];
+      return item.checkout?.readiness !== updated.checkout?.readiness;
+    });
+    if (changed) {
+      await basketStore.saveItems(updatedItems);
+    }
+
+    const allSessions = await sessionStore.listSessions();
+    return textResponse({
+      session,
+      allSessions,
+      itemsUpdated: changed,
+    });
+  }
+);
+
+registerTool(
+  "basket-list-sessions",
+  "List all known platform sessions across merchant domains. Useful for checking which sites the agent is already logged into.",
+  {},
+  async () => {
+    const sessions = await sessionStore.listSessions();
+    return textResponse({ sessions });
   }
 );
 
