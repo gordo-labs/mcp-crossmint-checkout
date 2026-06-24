@@ -36,6 +36,16 @@ export const ProductSnapshotSchema = z.object({
   policy: FlexibleRecordSchema.optional().describe("Returns, warranty, restrictions, subscription terms, compliance notes."),
   rating: FlexibleRecordSchema.optional().describe("Rating value, scale, count, review summary."),
   evidence: FlexibleRecordSchema.optional().describe("Query, reason, confidence, sources, observed timestamps."),
+  platformCheckout: z.object({
+    guestCheckout: z.boolean().optional(),
+    authRequired: z.boolean().optional(),
+    supportedPaymentMethods: z.array(z.enum([
+      "credit_card", "debit_card", "paypal", "apple_pay",
+      "google_pay", "crypto", "bank_transfer"
+    ])).optional(),
+    checkoutUrl: z.string().url().optional(),
+    cartPersistence: z.enum(["session", "account", "url", "none"]).optional(),
+  }).passthrough().optional().describe("Platform-specific checkout metadata detected on the product page."),
 }).passthrough();
 
 export const PlatformSessionSchema = z.object({
