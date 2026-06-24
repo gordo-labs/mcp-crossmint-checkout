@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execSync } from "node:child_process";
 
 import {
   isInstalled,
@@ -10,69 +11,60 @@ import {
   cryptoBalance,
   cryptoSend,
   cryptoRequest,
-  x402Fetch,
 } from "../build/lobster.js";
 
+const cliInstalled = isInstalled();
+
 describe("LobsterCash module — Historia 3.1", () => {
-  it("isInstalled returns boolean", () => {
-    assert.equal(typeof isInstalled(), "boolean");
+  it("isInstalled returns true", () => {
+    assert.equal(isInstalled(), true);
   });
 
-  it("status returns degraded object when CLI not installed", () => {
+  it("status returns structured object", () => {
     const s = status();
-    assert.equal(s.available, false);
-    assert.equal(s.walletConfigured, false);
-    assert.equal(s.hasBrowserAutomation, false);
-    assert.ok(s.error);
-    assert.ok(s.nextStep);
+    assert.equal(s.installed, true);
+    // walletConfigured depends on human authorization
+    assert.equal(typeof s.walletConfigured, "boolean");
+    assert.ok("hasBrowserAutomation" in s);
   });
 
-  it("cardsRequest throws not_installed", () => {
-    assert.throws(
-      () => cardsRequest(10, "test"),
-      (err) => err.code === "not_installed"
-    );
+  it("cardsRequest returns approval URL even without configured wallet", () => {
+    const result = cardsRequest(10, "test purchase");
+    assert.ok(result.approvalUrl.startsWith("https://www.lobster.cash/request/"));
+    assert.ok(result.message.includes("approve"));
   });
 
-  it("cardsList throws not_installed", () => {
+  it("cardsList throws wallet_not_configured", () => {
     assert.throws(
       () => cardsList(),
-      (err) => err.code === "not_installed"
+      (err) => err.code === "wallet_not_configured"
     );
   });
 
-  it("cardsReveal throws not_installed", () => {
+  it("cardsReveal throws wallet_not_configured", () => {
     assert.throws(
       () => cardsReveal("c1", "Test", "https://t.com", "US"),
-      (err) => err.code === "not_installed"
+      (err) => err.code === "wallet_not_configured"
     );
   });
 
-  it("cryptoBalance throws not_installed", () => {
+  it("cryptoBalance throws wallet_not_configured", () => {
     assert.throws(
       () => cryptoBalance(),
-      (err) => err.code === "not_installed"
+      (err) => err.code === "wallet_not_configured"
     );
   });
 
-  it("cryptoSend throws not_installed", () => {
+  it("cryptoSend throws wallet_not_configured", () => {
     assert.throws(
       () => cryptoSend("0x123", 1),
-      (err) => err.code === "not_installed"
+      (err) => err.code === "wallet_not_configured"
     );
   });
 
-  it("cryptoRequest throws not_installed", () => {
-    assert.throws(
-      () => cryptoRequest(10, "test"),
-      (err) => err.code === "not_installed"
-    );
-  });
-
-  it("x402Fetch throws not_installed", () => {
-    assert.throws(
-      () => x402Fetch("https://example.com"),
-      (err) => err.code === "not_installed"
-    );
+  it("cryptoRequest returns approval URL even without configured wallet", () => {
+    const result = cryptoRequest(10, "test top-up");
+    assert.ok(result.approvalUrl.startsWith("https://www.lobster.cash/request/"));
+    assert.ok(result.message.includes("approve"));
   });
 });

@@ -78,7 +78,9 @@ function run(
   };
 
   try {
-    const stdout = execSync(`${CLI} ${args.join(" ")}`, options) as string;
+    // Escape arguments with spaces and special chars for shell
+    const escaped = args.map((a) => a.includes(" ") || a.includes('"') ? `"${a.replace(/"/g, '\\"')}"` : a).join(" ");
+    const stdout = execSync(`${CLI} ${escaped}`, options) as string;
     return { stdout: stdout.trim(), stderr: "" };
   } catch (error: unknown) {
     const err = error as { code?: string; stderr?: string; stdout?: string; status?: number };
@@ -99,7 +101,6 @@ function run(
 
 function parseJson(stdout: string): unknown {
   try {
-    // Some CLI versions wrap JSON in extra output — find the first { or [
     const start = stdout.indexOf("{");
     const bracketStart = stdout.indexOf("[");
     if (start === -1 && bracketStart === -1) {
@@ -110,6 +111,13 @@ function parseJson(stdout: string): unknown {
   } catch {
     return { raw: stdout };
   }
+}
+
+/** Extract the approval URL from human-readable CLI output like:
+ *  "Open this URL to approve:\nhttps://www.lobster.cash/request/..." */
+function extractApprovalUrl(stdout: string): string {
+  const match = stdout.match(/https:\/\/www\.lobster\.cash\/request\/[a-f0-9-]+/i);
+  return match ? match[0] : "";
 }
 
 export function isInstalled(): boolean {
@@ -162,18 +170,19 @@ export function status(): LobsterStatus {
 }
 
 export function cardsRequest(amount: number, description: string): CardRequestResult {
-  // Round up to nearest $5
   const rounded = Math.ceil(amount / 5) * 5;
   const { stdout } = run(
     ["cards", "request", "--amount", String(rounded), "--description", description],
     CARDS_REQUEST_TIMEOUT
   );
-  const data = parseJson(stdout) as Record<string, unknown>;
+  const approvalUrl = extractApprovalUrl(stdout);
 
   return {
-    approvalUrl: (data.approvalUrl as string) || "",
-    cardId: data.cardId as string | undefined,
-    message: `Card request for $${rounded} submitted. Open ${data.approvalUrl} to approve.`,
+    approvalUrl,
+    cardId: undefined, // cardId comes from cards list after approval
+    message: approvalUrl
+      ? `Card request for $${rounded} submitted. Open ${approvalUrl} to approve.`
+      : `Card request for $${rounded} submitted. ${stdout.split("\n").slice(-3).join(" ")}`,
   };
 }
 
@@ -238,11 +247,13 @@ export function cryptoRequest(amount: number, description: string): CryptoReques
     "--amount", String(amount),
     "--description", description,
   ]);
-  const data = parseJson(stdout) as Record<string, unknown>;
+  const approvalUrl = extractApprovalUrl(stdout);
 
   return {
-    approvalUrl: (data.approvalUrl as string) || "",
-    message: `Crypto request for ${amount} submitted. Open ${data.approvalUrl} to approve.`,
+    approvalUrl,
+    message: approvalUrl
+      ? `Crypto request for $${amount} submitted. Open ${approvalUrl} to approve.`
+      : `Crypto request for $${amount} submitted. ${stdout.split("\n").slice(-3).join(" ")}`,
   };
 }
 
