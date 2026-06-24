@@ -16,6 +16,8 @@ import {
   CartItemInputSchema,
 } from "./basket/schema.js";
 import { renderBasketViewerHtml } from "./basket/viewer-html.js";
+import { SessionStore } from "./sessions/store.js";
+import * as LobsterCash from "./lobster.js";
 
 function setBaseHeaders(response: ServerResponse): void {
   response.setHeader("Access-Control-Allow-Origin", "*");
@@ -85,6 +87,17 @@ export async function startBasketViewer(options: {
 
       if (request.method === "GET" && (pathname === "/" || pathname === "/index.html")) {
         sendHtml(response, renderBasketViewerHtml());
+        return;
+      }
+
+      if (request.method === "GET" && pathname === "/api/sessions") {
+        const sessionStore = new SessionStore();
+        sendJson(response, 200, await sessionStore.listSessions());
+        return;
+      }
+
+      if (request.method === "GET" && pathname === "/api/lobster-status") {
+        sendJson(response, 200, LobsterCash.status());
         return;
       }
 

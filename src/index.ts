@@ -543,6 +543,120 @@ registerTool(
 
 // Register crossmint checkout tool to create orders
 registerTool(
+  "basket-checkout",
+  "Orchestrate checkout for one or more basket items. Detects the provider per item and routes to Crossmint, Lobster Cash cards, or crypto. Processes items sequentially to avoid wallet race conditions.",
+  {
+    itemIds: z.array(z.string()).optional().describe("Basket item ids to checkout. Defaults to approved or ready_for_checkout items."),
+    paymentMethod: z.enum(["crossmint", "lobstercash_card", "lobstercash_crypto", "auto"]).default("auto").describe("Force a specific payment method. 'auto' uses the detected provider."),
+  },
+  async ({ itemIds, paymentMethod }: any) => {
+    const basket = await basketStore.load();
+    const candidates = itemIds
+      ? basket.items.filter((i: any) => itemIds.includes(i.id))
+      : basket.items.filter((i: any) => i.status === "approved" || i.status === "ready_for_checkout");
+
+    if (candidates.length === 0) {
+      return textResponse({ error: "No items to checkout. Approve items first or provide itemIds." });
+    }
+
+    const results: any[] = [];
+    for (const item of candidates) {
+      const provider = paymentMethod === "auto"
+        ? (item.checkout?.provider || "unknown")
+        : paymentMethod;
+
+      try {
+        if (provider === "crossmint") {
+          const locator = item.checkout?.locator || item.product.identifiers?.crossmintLocator || item.product.identifiers?.productLocator;
+          if (!locator) {
+            results.push({ itemId: item.id, provider, status: "failed", details: { error: "No checkout locator for this item." } });
+            continue;
+          }
+          const missing = missingCheckoutConfig();
+          if (missing.length > 0) {
+            results.push({ itemId: item.id, provider, status: "failed", details: { error: "Crossmint not configured.", missingEnv: missing } });
+            continue;
+          }
+          // Create order via Crossmint API
+          const envRecipient = {
+            email: process.env.RECIPIENT_EMAIL,
+            physicalAddress: {
+              name: process.env.RECIPIENT_NAME,
+              line1: process.env.RECIPIENT_ADDRESS_LINE1,
+              line2: process.env.RECIPIENT_ADDRESS_LINE2 || "",
+              city: process.env.RECIPIENT_CITY,
+              state: process.env.RECIPIENT_STATE,
+              postalCode: process.env.RECIPIENT_POSTAL_CODE,
+              country: process.env.RECIPIENT_COUNTRY,
+            },
+          };
+          const resp = await makeCrossmintRequest("/orders", "POST", {
+            recipient: envRecipient,
+            payment: { method: CHAIN, currency: TOKEN, payerAddress: process.env.AGENT_WALLET_ADDRESS, receiptEmail: process.env.RECIPIENT_EMAIL },
+            lineItems: [{ productLocator: locator }],
+          });
+          const txId = resp.order?.payment?.preparation?.serializedTransaction;
+          if (txId) await createTransaction(txId);
+          await basketStore.upsertItem({ ...item, checkout: { ...(item.checkout as Record<string, unknown> || {}), orderId: resp.order?.orderId, readiness: "ready" }, status: "ordered" });
+          results.push({ itemId: item.id, provider, status: "ordered", details: { orderId: resp.order?.orderId } });
+
+        } else if (provider === "lobstercash_card") {
+          if (!LobsterCash.isInstalled()) {
+            results.push({ itemId: item.id, provider, status: "failed", details: { error: "Lobster Cash CLI not installed. Run: npm install -g @crossmint/lobster-cli" } });
+            continue;
+          }
+          const domain = item.checkout?.sessionDomain || item.product.merchant?.domain;
+          if (item.checkout?.requiresAuth && domain) {
+            const session = await sessionStore.getSession(domain as string);
+            if (!session || session.status !== "logged_in") {
+              await basketStore.upsertItem({ ...item, checkout: { ...(item.checkout as Record<string, unknown> || {}), readiness: "needs_session" } });
+              results.push({ itemId: item.id, provider, status: "needs_session", details: { domain, message: "Login required. Use basket-set-session after logging in." } });
+              continue;
+            }
+          }
+          const price = (item.product.price as any)?.current?.amount || (item.product.price as any)?.amount || 0;
+          const description = `Purchase: ${item.product.title}`;
+          const card = LobsterCash.cardsRequest(price, description);
+          await basketStore.upsertItem({ ...item, checkout: { ...(item.checkout as Record<string, unknown> || {}), readiness: "needs_approval" } });
+          results.push({ itemId: item.id, provider, status: "needs_approval", details: { approvalUrl: card.approvalUrl, cardId: card.cardId, message: card.message, nextStep: "Human must approve the card, then use lobstercash-cards-reveal to get card details." } });
+
+        } else if (provider === "lobstercash_crypto") {
+          if (!LobsterCash.isInstalled()) {
+            results.push({ itemId: item.id, provider, status: "failed", details: { error: "Lobster Cash CLI not installed." } });
+            continue;
+          }
+          const bal = LobsterCash.cryptoBalance();
+          const price = (item.product.price as any)?.current?.amount || (item.product.price as any)?.amount || 0;
+          const hasFunds = (bal.balances || []).some((b: any) => parseFloat(b.amount || "0") >= price);
+          if (!hasFunds) {
+            results.push({ itemId: item.id, provider, status: "failed", details: { error: "Insufficient crypto funds.", balances: bal.balances, suggestion: "Use lobstercash crypto request to request more funds." } });
+            continue;
+          }
+          results.push({ itemId: item.id, provider, status: "needs_approval", details: { balances: bal.balances, nextStep: "Use lobstercash-crypto-send with the merchant's wallet address or lobstercash x402-fetch for x402 payments." } });
+
+        } else {
+          results.push({ itemId: item.id, provider, status: "failed", details: { error: `No automated checkout available. Provider: ${provider}. Use manual checkout.` } });
+        }
+      } catch (error: any) {
+        results.push({ itemId: item.id, provider, status: "failed", details: { error: error.message || String(error) } });
+      }
+    }
+
+    return textResponse({
+      results,
+      summary: {
+        total: results.length,
+        ordered: results.filter((r: any) => r.status === "ordered").length,
+        needsApproval: results.filter((r: any) => r.status === "needs_approval").length,
+        needsSession: results.filter((r: any) => r.status === "needs_session").length,
+        failed: results.filter((r: any) => r.status === "failed").length,
+      },
+      viewerUrl: getBasketViewerUrl(),
+    });
+  }
+);
+
+registerTool(
   "create-order",
   "Create a new order for a product",
   {
@@ -551,7 +665,8 @@ registerTool(
         productLocator: z.string()
           .describe("The product locator. Ex: 'amazon:<amazon_product_url>', 'amazon:<asin>', 'shopify:<product-url>:<variant-id>'"),
       })
-    ).length(1).describe("Item to purchase")
+    ).length(1).describe("Item to purchase"),
+    paymentMethod: z.enum(["crossmint", "lobstercash_card", "lobstercash_crypto"]).default("crossmint").optional().describe("Payment method. Default: crossmint."),
   },
   async ({
     lineItems
